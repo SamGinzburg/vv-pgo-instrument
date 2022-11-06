@@ -8,6 +8,7 @@ use walrus::TableId;
 use walrus::FunctionBuilder;
 use walrus::ValType;
 use walrus::FunctionId;
+use walrus::GlobalId;
 use std::collections::HashSet;
 use std::collections::HashMap;
 
@@ -18,7 +19,6 @@ struct TypeScan {
 
 impl VisitorMut for TypeScan {
     fn visit_instr_mut(&mut self, instr: &mut walrus::ir::Instr, idx: &mut walrus::InstrLocId) {
-        //dbg!(&instr);
         match instr {
             CallIndirect(call_indirect) => {
                 self.ty.push((call_indirect.ty, call_indirect.table));
@@ -54,6 +54,7 @@ fn main() {
     for (ty, tab) in final_types {
         // Look up parameters / results from the type id
         let mut params = Vec::from(module.types.get(ty).params());
+        let old_params = params.clone();
         //call target location (for profiling) 
         params.push(ValType::I32);
         // call_indirect target value
@@ -75,10 +76,13 @@ fn main() {
 
         let mut func_body = indirect_stub.func_body();
 
-        for idx in 1..params.len() {
+        for idx in 0..(params.len()-1) {
             func_body.local_get(param_locals[idx]);
         }
 
+        // Find the *correct* type for the indirect call
+        let new_ty = module.types.find(&old_params, &results).unwrap();
+        dbg!(&ty == &new_ty);
         func_body.call_indirect(ty, tab);
 
         let indirect_stub_id = indirect_stub.finish(param_locals, &mut module.funcs);
@@ -147,21 +151,40 @@ fn main() {
     });
 
     // Now insert globals to track each call site
-    for idx in 0..global_index {
-        module.globals.add_local(walrus::ValType::I32, true, walrus::InitExpr::Value(Value::I32(-1)));
+    let mut global_map: HashMap<usize, GlobalId> = HashMap::new();
+    for idx in 0..(global_index as usize) {
+        global_map.insert(idx, module.globals.add_local(walrus::ValType::I32, true, walrus::InitExpr::Value(Value::I32(-1))));
     }
 
     // Now time to go back and modify the indirect call stubs to modify local values
      module.funcs.iter_local_mut().for_each(|(id, func)| {
         if skip_funcs.contains(&id) {
-            let func_body = func.builder_mut().func_body();
+            let args = &func.args.clone();
+            let mut func_body = func.builder_mut().func_body();
             // Right now the func body just contains the indirect call at the end
             // For each stub:
             // 1) Check the global index of the call (call target)
             // 2) If the global == -1, then set the value to the call_indirect index
-            // 3) If the global != -1, then check if the global value == call_indirect index
-            // 3.1) If not, set the global value to -2
-            dbg!(&func_body);
+            // 3) Then check if the global value != call_indirect index
+            // 3.1) If so, set the global value to -2
+            /*
+            for global_idx in 0..global_index as usize {
+                func_body.block_at(0, None, |block| {
+                    block.global_get(*global_map.get(&global_idx).unwrap())
+                         .i32_const(-1).binop(BinaryOp::I32Eq).if_else(None, |then| {
+                        then.local_get(args[0]).global_set(*global_map.get(&global_idx).unwrap());
+                    }, |else_| {
+                        // 3) Then check if the global value != call_indirect index
+                        else_.global_get(*global_map.get(&global_idx).unwrap())
+                             .local_get(args[0]).binop(BinaryOp::I32Ne).if_else(None, |then| {
+                            then.i32_const(-2).global_set(*global_map.get(&global_idx).unwrap());
+                        }, |else_| {
+                            // global value == call_indirect index here, so we have a No-op
+                        });
+                    });
+                });
+            }
+            */
         }
     });
 
