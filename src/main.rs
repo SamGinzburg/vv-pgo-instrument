@@ -82,7 +82,7 @@ fn main() {
 
         // Find the *correct* type for the indirect call
         let new_ty = module.types.find(&old_params, &results).unwrap();
-        dbg!(&ty == &new_ty);
+        assert!(new_ty == ty, "type mismatch when creating stubs");
         func_body.call_indirect(ty, tab);
 
         let indirect_stub_id = indirect_stub.finish(param_locals, &mut module.funcs);
@@ -167,7 +167,6 @@ fn main() {
             // 2) If the global == -1, then set the value to the call_indirect index
             // 3) Then check if the global value != call_indirect index
             // 3.1) If so, set the global value to -2
-            /*
             for global_idx in 0..global_index as usize {
                 func_body.block_at(0, None, |block| {
                     block.global_get(*global_map.get(&global_idx).unwrap())
@@ -184,9 +183,14 @@ fn main() {
                     });
                 });
             }
-            */
         }
     });
+
+    // Export all of our globals
+    for (idx, g) in global_map {
+        module.exports.add(&format!("global_{}", idx), g);
+    }
+
 
     let wasm = module.emit_wasm();
     if let Some(destination) = std::env::args().nth(2) {
