@@ -161,26 +161,28 @@ fn main() {
         if skip_funcs.contains(&id) {
             let args = &func.args.clone();
             let mut func_body = func.builder_mut().func_body();
-            // Right now the func body just contains the indirect call at the end
-            // For each stub:
-            // 1) Check the global index of the call (call target)
-            // 2) If the global == -1, then set the value to the call_indirect index
-            // 3) Then check if the global value != call_indirect index
-            // 3.1) If so, set the global value to -2
             for global_idx in 0..global_index as usize {
+
                 func_body.block_at(0, None, |block| {
-                    block.global_get(*global_map.get(&global_idx).unwrap())
-                         .i32_const(-1).binop(BinaryOp::I32Eq).if_else(None, |then| {
-                        then.local_get(args[0]).global_set(*global_map.get(&global_idx).unwrap());
-                    }, |else_| {
-                        // 3) Then check if the global value != call_indirect index
-                        else_.global_get(*global_map.get(&global_idx).unwrap())
-                             .local_get(args[0]).binop(BinaryOp::I32Ne).if_else(None, |then| {
-                            then.i32_const(-2).global_set(*global_map.get(&global_idx).unwrap());
-                        }, |else_| {
-                            // global value == call_indirect index here, so we have a No-op
-                        });
-                    });
+                    // Check which call target we are in
+                    block.local_get(args[args.len()-2]).i32_const(global_idx.try_into().unwrap()).binop(BinaryOp::I32Eq).if_else(None, |then| {
+                        // For each target, we want to check if the previous indirect call
+                        // matches...
+                        then.global_get(*global_map.get(&global_idx).unwrap()).i32_const(-1).binop(BinaryOp::I32Eq)
+                            // if the global == -1, then the function hasn't been called yet!
+                            // we can set the global value...
+                            .if_else(None, |then| {
+                                then.local_get(args[args.len()-3])
+                                    .global_set(*global_map.get(&global_idx).unwrap());
+                            }, |_| {})
+                            // if the global != -1 AND global != local, then set global to -2
+                            .local_get(args[args.len()-3])
+                            .global_get(*global_map.get(&global_idx).unwrap())
+                            .binop(BinaryOp::I32Ne)
+                                .if_else(None, |then| {
+                                    then.i32_const(-2).global_set(*global_map.get(&global_idx).unwrap());
+                            }, |_| {});
+                    }, |else_| {});
                 });
             }
         }
@@ -188,7 +190,7 @@ fn main() {
 
     // Export all of our globals
     for (idx, g) in global_map {
-        module.exports.add(&format!("global_{}", idx), g);
+        module.exports.add(&format!("profiling_global_{}", idx), g);
     }
 
 
