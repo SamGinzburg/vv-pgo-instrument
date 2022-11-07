@@ -92,16 +92,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25a2bc672d1148e28034f176e01fffebb08b35768468cc954630da77a1449005"
 
 [[package]]
-name = "instrumenttest"
-version = "0.1.0"
-dependencies = [
- "clap",
- "rmp-serde",
- "serde",
- "walrus",
-]
-
-[[package]]
 name = "leb128"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -246,6 +236,16 @@ name = "vec_map"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1bddf1187be692e79c5ffeab891132dfb0f236ed36a43c7ed39f1165ee20191"
+
+[[package]]
+name = "vv-profiler"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rmp-serde",
+ "serde",
+ "walrus",
+]
 
 [[package]]
 name = "walrus"

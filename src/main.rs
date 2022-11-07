@@ -111,55 +111,58 @@ fn main() {
     let mut modified_map: HashMap<usize, MapValue> = HashMap::new();
     let tab_id = module.tables.main_function_table().unwrap().unwrap();
     let table = module.tables.get(tab_id);
-    for elem in &table.elem_segments {
-        let e = module.elements.get(*elem);
-        let offset: usize = match e.kind {
-            walrus::ElementKind::Active {
-                table: t,
-                offset: expr,
-            } => match expr {
-                walrus::InitExpr::Value(Value::I32(x)) => x as usize,
+    if is_opt {
+        for elem in &table.elem_segments {
+            let e = module.elements.get(*elem);
+            let offset: usize = match e.kind {
+                walrus::ElementKind::Active {
+                    table: t,
+                    offset: expr,
+                } => match expr {
+                    walrus::InitExpr::Value(Value::I32(x)) => x as usize,
+                    _ => 0,
+                },
                 _ => 0,
-            },
-            _ => 0,
-        };
+            };
 
-        dbg!(&e.members);
+            //dbg!(&e.members);
 
-        // Now that we have the offset, we can remap our profile data
-        // We recorded a mapping of indicies in this table to a value of {-1/-2/integer >= 0}
-        // We need to remap the index in this table to a FuncionId in this element
-        // Later we will replace indirect calls using this mapping of global idx ==> FunctionId
-        for (global_idx, indirect_idx) in &map.as_ref().unwrap().map {
-            if *indirect_idx >= 0 {
-                /*
-                let val = MapValue {
-                    f_id: e.members[0],
-                    f_bool: false,
-                };
-                */
-                let val = MapValue {
-                    f_id: e.members[(*indirect_idx as usize) - offset],
-                    f_bool: false,
-                };
-                modified_map.insert(*global_idx, val);
-            // if we must retain the indirect call
-            } else if *indirect_idx == -2 {
-                let val = MapValue {
-                    f_id: None,
-                    f_bool: false,
-                };
-                modified_map.insert(*global_idx, val);
-            } else {
-                let val = MapValue {
-                    f_id: None,
-                    f_bool: true,
-                };
-                modified_map.insert(*global_idx, val);
+            // Now that we have the offset, we can remap our profile data
+            // We recorded a mapping of indicies in this table to a value of {-1/-2/integer >= 0}
+            // We need to remap the index in this table to a FuncionId in this element
+            // Later we will replace indirect calls using this mapping of global idx ==> FunctionId
+            for (global_idx, indirect_idx) in &map.as_ref().unwrap().map {
+                if *indirect_idx >= 0 {
+                    /*
+                    let val = MapValue {
+                        f_id: e.members[0],
+                        f_bool: false,
+                    };
+                    */
+                    let val = MapValue {
+                        f_id: e.members[(*indirect_idx as usize) - offset],
+                        f_bool: false,
+                    };
+                    modified_map.insert(*global_idx, val);
+                // if we must retain the indirect call
+                } else if *indirect_idx == -2 {
+                    let val = MapValue {
+                        f_id: None,
+                        f_bool: false,
+                    };
+                    modified_map.insert(*global_idx, val);
+                } else {
+                    let val = MapValue {
+                        f_id: None,
+                        f_bool: true,
+                    };
+                    modified_map.insert(*global_idx, val);
+                }
             }
+            break;
         }
-        break;
     }
+
     let original_map = modified_map.clone();
     // Scan for all indirect call types
     let types: Vec<Vec<(TypeId, TableId)>> = module
