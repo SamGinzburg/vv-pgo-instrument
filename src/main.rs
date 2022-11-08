@@ -1,3 +1,6 @@
+mod profilemap;
+mod instrument;
+
 use clap::{value_t, App, Arg};
 use rmp_serde::decode;
 use serde::Deserialize;
@@ -17,25 +20,18 @@ use walrus::InstrSeqBuilder;
 use walrus::TableId;
 use walrus::TypeId;
 use walrus::ValType;
+use profilemap::process_map;
+use profilemap::MapValue;
+use instrument::generate_stubs;
 
 #[derive(Deserialize, Debug)]
-struct Profile {
+pub struct Profile {
     map: HashMap<usize, i32>,
 }
 
 #[derive(Debug)]
 struct TypeScan {
     ty: Vec<(TypeId, TableId)>,
-}
-
-// In our modified map, we can perform 3 operations:
-// 1) Replace an indirect call with a func id
-// 2) Replace an indirect call with "unreachable"
-// 3) No-op
-#[derive(Clone, Debug)]
-struct MapValue {
-    f_id: Option<FunctionId>,
-    f_bool: bool,
 }
 
 impl VisitorMut for TypeScan {
@@ -109,58 +105,10 @@ fn main() {
     // We need to map the profiling data to FunctionId refs in the AST
     // We parse table 0, get the offset, and then iterate through the functions
     let mut modified_map: HashMap<usize, MapValue> = HashMap::new();
-    let tab_id = module.tables.main_function_table().unwrap().unwrap();
-    let table = module.tables.get(tab_id);
+    //let tab_id = module.tables.main_function_table().unwrap().unwrap();
+    //let table = module.tables.get(tab_id);
     if is_opt {
-        for elem in &table.elem_segments {
-            let e = module.elements.get(*elem);
-            let offset: usize = match e.kind {
-                walrus::ElementKind::Active {
-                    table: t,
-                    offset: expr,
-                } => match expr {
-                    walrus::InitExpr::Value(Value::I32(x)) => x as usize,
-                    _ => 0,
-                },
-                _ => 0,
-            };
-
-            //dbg!(&e.members);
-
-            // Now that we have the offset, we can remap our profile data
-            // We recorded a mapping of indicies in this table to a value of {-1/-2/integer >= 0}
-            // We need to remap the index in this table to a FuncionId in this element
-            // Later we will replace indirect calls using this mapping of global idx ==> FunctionId
-            for (global_idx, indirect_idx) in &map.as_ref().unwrap().map {
-                if *indirect_idx >= 0 {
-                    /*
-                    let val = MapValue {
-                        f_id: e.members[0],
-                        f_bool: false,
-                    };
-                    */
-                    let val = MapValue {
-                        f_id: e.members[(*indirect_idx as usize) - offset],
-                        f_bool: false,
-                    };
-                    modified_map.insert(*global_idx, val);
-                // if we must retain the indirect call
-                } else if *indirect_idx == -2 {
-                    let val = MapValue {
-                        f_id: None,
-                        f_bool: false,
-                    };
-                    modified_map.insert(*global_idx, val);
-                } else {
-                    let val = MapValue {
-                        f_id: None,
-                        f_bool: true,
-                    };
-                    modified_map.insert(*global_idx, val);
-                }
-            }
-            break;
-        }
+        process_map(&module, &map, &mut modified_map);
     }
 
     let original_map = modified_map.clone();
@@ -184,115 +132,14 @@ fn main() {
 
     // For each indirect call type generate a new function in the module to serve as a stub
     let mut stubs: HashMap<TypeId, FunctionId> = HashMap::new();
-    let mut idx = 0;
-    if !is_opt {
-        for (ty, tab) in final_types {
-            // Look up parameters / results from the type id
-            let mut params = Vec::from(module.types.get(ty).params());
-            let old_params = params.clone();
-            // call target location (for profiling)
-            params.push(ValType::I32);
-            // call_indirect target value
-            params.push(ValType::I32);
 
-            let results = Vec::from(module.types.get(ty).results());
-            let mut indirect_stub = FunctionBuilder::new(&mut module.types, &params, &results);
-            indirect_stub.name(format!("indirect_stub_{}", idx));
-            idx += 1;
-            let mut param_locals = vec![];
-
-            // push one extra local for tracking call sites when profiling
-            param_locals.push(module.locals.add(ValType::I32));
-
-            for p in &params {
-                let n = module.locals.add(*p);
-                param_locals.push(n);
-            }
-
-            let mut func_body = indirect_stub.func_body();
-
-            for idx in 0..(params.len() - 1) {
-                func_body.local_get(param_locals[idx]);
-            }
-
-            // Find the *correct* type for the indirect call
-            let new_ty = module.types.find(&old_params, &results).unwrap();
-            assert!(new_ty == ty, "type mismatch when creating stubs");
-            func_body.call_indirect(ty, tab);
-
-            let indirect_stub_id = indirect_stub.finish(param_locals, &mut module.funcs);
-            stubs.insert(ty, indirect_stub_id);
-        }
-    } else {
-        // When optimizing we still need to construct new functions!
-        // For each indirect call we are directizing, we create a stub that takes in an
-        // extra i32 param, to avoid dealing with extra
-        for (key, val) in &modified_map.clone() {
-            match val.f_id {
-                Some(id) => {
-                    // If we have some function, we want to make a function that calls it for us!
-                    // First get the types of the old function
-                    println!(
-                        "Optimizing function: {}",
-                        &module.funcs.get(id).name.as_ref().unwrap()
-                    );
-                    let ty_id = module.funcs.get(id).ty();
-                    let mut params = Vec::from(module.types.get(ty_id).params());
-                    let old_params = params.clone();
-                    // call target location (to trap if we messed up & maintain the same params)
-                    params.push(ValType::I32);
-
-                    let results = Vec::from(module.types.get(ty_id).results());
-
-                    let mut temp = FunctionBuilder::new(&mut module.types, &params, &results);
-                    temp.name(format!("indirect_call_stub_{}", idx));
-                    idx += 1;
-                    let mut param_locals = vec![];
-
-                    for p in &params {
-                        let n = module.locals.add(*p);
-                        param_locals.push(n);
-                    }
-                    let mut func_body = temp.func_body();
-
-                    // Check that the call target matches
-                    let target = *map.as_ref().unwrap().map.get(key).unwrap();
-                    func_body.block_at(0, None, |block| {
-                        block
-                            .i32_const(target)
-                            .local_get(param_locals[params.len() - 1])
-                            .binop(BinaryOp::I32Ne)
-                            .if_else(
-                                None,
-                                |then| {
-                                    then.unreachable();
-                                },
-                                |_| {},
-                            );
-                    });
-
-                    for idx in 0..(params.len() - 1) {
-                        func_body.local_get(param_locals[idx]);
-                    }
-
-                    // call the old id!
-                    func_body.call(id);
-
-                    let new_id = temp.finish(param_locals, &mut module.funcs);
-
-                    let val = MapValue {
-                        f_id: Some(new_id),
-                        f_bool: false,
-                    };
-                    modified_map.insert(*key, val);
-
-                    let new_ty = module.types.find(&old_params, &results).unwrap();
-                    assert!(new_ty == ty_id, "type mismatch when creating stubs");
-                }
-                _ => (),
-            }
-        }
-    }
+    // Generate stubs to replace indirect calls + add instrumentation
+    generate_stubs(&mut module,
+                  &mut final_types,
+                  &mut stubs,
+                  &mut modified_map,
+                  &map,
+                  is_opt);
 
     // values
     let mut skip_funcs: HashSet<FunctionId> = HashSet::new();
@@ -418,6 +265,17 @@ fn main() {
             );
         }
 
+        // Create a global for tracking "slowcalls"
+        // Every time we call a function that VV can't optimize we will inc this counter
+        let slowcalls_id = module.globals.add_local(
+                    walrus::ValType::I32,
+                    true,
+                    walrus::InitExpr::Value(Value::I32(-1)),
+                );
+        // Construct a mapping of function id ==> bools, to identify fastcalls
+
+
+
         // Now time to go back and modify the indirect call stubs to modify local values
         module.funcs.iter_local_mut().for_each(|(id, func)| {
             if skip_funcs.contains(&id) {
@@ -425,6 +283,11 @@ fn main() {
                 let mut func_body = func.builder_mut().func_body();
                 for global_idx in 0..global_index as usize {
                     func_body.block_at(0, None, |block| {
+                        block.global_get(slowcalls_id)
+                             .i32_const(1).binop(BinaryOp::I32Add)
+                             .global_set(slowcalls_id);
+                    });
+                    func_body.block_at(1, None, |block| {
                         // Check which call target we are in
                         block
                             .local_get(args[args.len() - 2])
@@ -470,11 +333,16 @@ fn main() {
             }
         });
 
+        // Now that we have instrumented the indirect calls,
+        // we will instrument the regular slowcalls
+
+        module.exports.add(&format!("slowcalls"), slowcalls_id);
         // Export all of our globals
         for (idx, g) in global_map {
             module.exports.add(&format!("profiling_global_{}", idx), g);
         }
     }
+
 
     let wasm = module.emit_wasm();
     std::fs::write(output, wasm).unwrap();
