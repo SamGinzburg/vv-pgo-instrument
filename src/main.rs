@@ -389,9 +389,9 @@ fn main() {
                     .binop(BinaryOp::I32Ne)
                     .if_else(None, |then| {
                         for idx in 0..indirect_window {
-                            //then
-                            //.i32_const(-2)
-                            //.global_set(arr[idx]);
+                            then
+                            .i32_const(-2)
+                            .global_set(arr[idx]);
                         }
                     }, |_| {});
                 }, |_| {});
