@@ -26,7 +26,7 @@ use instrument::generate_stubs;
 
 #[derive(Deserialize, Debug)]
 pub struct Profile {
-    map: HashMap<usize, i32>,
+    map: HashMap<usize, Vec<i32>>,
 }
 
 #[derive(Debug)]
@@ -83,6 +83,7 @@ fn main() {
         )
         .get_matches();
 
+    let indirect_window = 5;
     let input = value_t!(matches.value_of("input"), String).unwrap_or_else(|e| e.exit());
     let output = value_t!(matches.value_of("output"), String).unwrap_or_else(|e| e.exit());
     let optimize: Option<&str> = matches.value_of("optimize");
@@ -99,6 +100,7 @@ fn main() {
         }
         _ => None,
     };
+    //dbg!(&map);
 
     let mut module = walrus::Module::from_file(input).unwrap();
 
@@ -135,11 +137,11 @@ fn main() {
 
     // Generate stubs to replace indirect calls + add instrumentation
     generate_stubs(&mut module,
-                  &mut final_types,
-                  &mut stubs,
-                  &mut modified_map,
-                  &map,
-                  is_opt);
+                   &mut final_types,
+                   &mut stubs,
+                   &mut modified_map,
+                   &map,
+                   is_opt);
 
     // values
     let mut skip_funcs: HashSet<FunctionId> = HashSet::new();
@@ -178,6 +180,10 @@ fn main() {
                         }
                         Loop(l) => {
                             seqs_to_process.push(l.seq);
+                        }
+                        IfElse(if_else) => {
+                            seqs_to_process.push(if_else.consequent);
+                            seqs_to_process.push(if_else.alternative);
                         }
                         _ => {}
                     }
@@ -226,7 +232,9 @@ fn main() {
                             f_bool: _b,
                         } => {
                             // Remove the indirect call + the idx
-                            body.instr_at(point, walrus::ir::Call { func: *id });
+                            // id should be a vec of size 1
+                            assert!(id.len() == 1, "id is of len: {}", id.len());
+                            body.instr_at(point, walrus::ir::Call { func: id[0] });
                             // We now have Call --> CallIndirect, with "Call" at point
                             body.instrs_mut().remove(point+1);
                         }
@@ -236,14 +244,18 @@ fn main() {
                             f_bool: true,
                         } => {
                             body.instr_at(point, walrus::ir::Unreachable {});
-                            body.instrs_mut().remove(point + 1);
+                            body.instrs_mut().remove(point+1);
                         }
                         // Retain the indirect call (no-op)
                         MapValue {
                             f_id: None,
                             f_bool: false,
-                        } => {}
-                        _ => (),
+                        } => {
+                            println!("retaining call...");
+                        }
+                        _ => {
+                            panic!("unhandled case: {:?}", map_val);
+                        },
                     }
                     global_index += 1;
                 }
@@ -253,15 +265,21 @@ fn main() {
 
     if !is_opt {
         // Now insert globals to track each call site
-        let mut global_map: HashMap<usize, GlobalId> = HashMap::new();
+        let mut global_map: HashMap<usize, Vec<GlobalId>> = HashMap::new();
+        // Insert X many globals per-call site
+        // We do this to track cases where just a few different targets are possible
         for idx in 0..(global_index as usize) {
-            global_map.insert(
-                idx,
-                module.globals.add_local(
+            let mut new_globals = vec![];
+            for inner_idx in 0..indirect_window {
+                new_globals.push(module.globals.add_local(
                     walrus::ValType::I32,
                     true,
                     walrus::InitExpr::Value(Value::I32(-1)),
-                ),
+                ));
+            }
+            global_map.insert(
+                idx, // e.g., Map 0,1,2,3,4 --> to the same call site to mimic an array
+                new_globals,
             );
         }
 
@@ -273,55 +291,77 @@ fn main() {
                     walrus::InitExpr::Value(Value::I32(-1)),
                 );
         // Construct a mapping of function id ==> bools, to identify fastcalls
-
+        // TODO
 
 
         // Now time to go back and modify the indirect call stubs to modify local values
-        module.funcs.iter_local_mut().for_each(|(id, func)| {
-            if skip_funcs.contains(&id) {
-                let args = &func.args.clone();
-                let mut func_body = func.builder_mut().func_body();
-                for global_idx in 0..global_index as usize {
-                    func_body.block_at(0, None, |block| {
-                        block.global_get(slowcalls_id)
-                             .i32_const(1).binop(BinaryOp::I32Add)
-                             .global_set(slowcalls_id);
-                    });
-                    func_body.block_at(1, None, |block| {
+        for function_idx in skip_funcs {
+            let id = function_idx;
+            let func = module.funcs.get_mut(function_idx).kind.unwrap_local_mut();
+            let args = &func.args.clone();
+            let call_target = args[args.len() - 1];
+            let indirect_call_value = args[args.len() - 2];
+            let mut func_builder = func.builder_mut();
+            let mut func_body = func_builder.func_body();
+            //let local_vals = stub_locals.get(&id).unwrap();
+            //let counter = local_vals[0];
+            //let set_value =  local_vals[1];
+            //let counter = module.locals.add(ValType::I32);
+            let set_value = module.locals.add(ValType::I32);
+            func_body.block_at(0, None, |block| {
+                block.global_get(slowcalls_id)
+                     .i32_const(1).binop(BinaryOp::I32Add)
+                     .global_set(slowcalls_id);
+            });
+            drop(func_body);
+            let mut block_seq = func_builder.dangling_instr_seq(None);
+            let block_seq_id = block_seq.id();
+            for global_idx in 0..global_index as usize {
+                /*
+                 * We have an array of values representing each call site
+                 * We "iterate" through the "array" to find an open slot
+                 *
+                 * For each slot:
+                 * if the matching global is -1, set the value ( and set_value <- true) 
+                 *  after setting, we break out.
+                 *
+                 * if after falling through all available slots, set_value != true
+                 * set all globals for this call site to -2
+                 *
+                 */
+                for array_value in global_map.get(&global_idx).unwrap() {
+                    block_seq.block(None, |block| {
                         // Check which call target we are in
                         block
-                            .local_get(args[args.len() - 2])
-                            .i32_const(global_idx.try_into().unwrap())
+                            .local_get(call_target)
+                            .i32_const((global_idx).try_into().unwrap())
                             .binop(BinaryOp::I32Eq)
                             .if_else(
                                 None,
                                 |then| {
                                     // For each target, we want to check if the previous indirect call
                                     // matches...
-                                    then.global_get(*global_map.get(&global_idx).unwrap())
+                                        then
+                                        .global_get(*array_value)
                                         .i32_const(-1)
                                         .binop(BinaryOp::I32Eq)
+                                        // OR if the value is already set
+                                        .global_get(*array_value)
+                                        .local_get(indirect_call_value)
+                                        .binop(BinaryOp::I32Eq)
+                                        .binop(BinaryOp::I32Or)
                                         // if the global == -1, then the function hasn't been called yet!
                                         // we can set the global value...
                                         .if_else(
                                             None,
                                             |then| {
-                                                then.local_get(args[args.len() - 3]).global_set(
-                                                    *global_map.get(&global_idx).unwrap(),
-                                                );
-                                            },
-                                            |_| {},
-                                        )
-                                        // if the global != -1 AND global != local, then set global to -2
-                                        .local_get(args[args.len() - 3])
-                                        .global_get(*global_map.get(&global_idx).unwrap())
-                                        .binop(BinaryOp::I32Ne)
-                                        .if_else(
-                                            None,
-                                            |then| {
-                                                then.i32_const(-2).global_set(
-                                                    *global_map.get(&global_idx).unwrap(),
-                                                );
+                                                then.local_get(indirect_call_value)
+                                                    .global_set(
+                                                    *array_value,
+                                                )
+                                                .i32_const(1)
+                                                .local_set(set_value)
+                                                .br(block_seq_id);
                                             },
                                             |_| {},
                                         );
@@ -331,7 +371,32 @@ fn main() {
                     });
                 }
             }
-        });
+            drop(block_seq);
+            let mut func_body = func_builder.func_body();
+            func_body.instr_at(1, walrus::ir::Instr::Block ( walrus::ir::Block { seq: block_seq_id } ) );
+            // now check if we failed to set any of the slots for our call target
+            // we have to do this for each call target all over again...
+            for global_idx in 0..global_index as usize {
+                let arr = global_map.get(&(global_idx as usize)).unwrap();
+                func_body
+                .local_get(indirect_call_value)
+                .i32_const((global_idx).try_into().unwrap())
+                .binop(BinaryOp::I32Eq)
+                .if_else(None, |then| {
+                    then
+                    .local_get(set_value)
+                    .i32_const(1)
+                    .binop(BinaryOp::I32Ne)
+                    .if_else(None, |then| {
+                        for idx in 0..indirect_window {
+                            //then
+                            //.i32_const(-2)
+                            //.global_set(arr[idx]);
+                        }
+                    }, |_| {});
+                }, |_| {});
+            }
+        }
 
         // Now that we have instrumented the indirect calls,
         // we will instrument the regular slowcalls
@@ -339,7 +404,10 @@ fn main() {
         module.exports.add(&format!("slowcalls"), slowcalls_id);
         // Export all of our globals
         for (idx, g) in global_map {
-            module.exports.add(&format!("profiling_global_{}", idx), g);
+            // We represent each callsite using multuple global values
+            for inner_idx in 0..g.len() {
+                module.exports.add(&format!("profiling_global_{}_{}", idx, inner_idx), g[inner_idx]);
+            }
         }
     }
 

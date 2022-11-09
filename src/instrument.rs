@@ -29,17 +29,22 @@ pub fn generate_stubs(module: &mut Module,
             idx += 1;
             let mut param_locals = vec![];
 
+            // add two locals we need later on
+
             // push one extra local for tracking call sites when profiling
-            param_locals.push(module.locals.add(ValType::I32));
+            //param_locals.push(module.locals.add(ValType::I32));
 
             for p in &params {
                 let n = module.locals.add(*p);
                 param_locals.push(n);
             }
 
+            // push one extra local for tracking call sites when profiling
+            //param_locals.push(module.locals.add(ValType::I32));
+
             let mut func_body = indirect_stub.func_body();
 
-            for idx in 0..(params.len() - 1) {
+            for idx in 0..(param_locals.len()-1) {
                 func_body.local_get(param_locals[idx]);
             }
 
@@ -49,22 +54,29 @@ pub fn generate_stubs(module: &mut Module,
             func_body.call_indirect(ty, tab);
 
             let indirect_stub_id = indirect_stub.finish(param_locals, &mut module.funcs);
+            //stub_locals.insert(indirect_stub_id, vec![counter, set_value]);
             stubs.insert(ty, indirect_stub_id);
         }
     } else {
         // When optimizing we still need to construct new functions!
         // For each indirect call we are directizing, we create a stub that takes in an
         // extra i32 param, to avoid dealing with extra
+        //dbg!(&modified_map);
         for (key, val) in &modified_map.clone() {
-            match val.f_id {
-                Some(id) => {
+            match &val.f_id {
+                Some(id) if id.len() > 0 => {
+                    //dbg!(&id);
                     // If we have some function, we want to make a function that calls it for us!
                     // First get the types of the old function
-                    println!(
-                        "Optimizing function: {}",
-                        &module.funcs.get(id).name.as_ref().unwrap()
-                    );
-                    let ty_id = module.funcs.get(id).ty();
+                    for value in id {
+                        println!(
+                            "Optimizing function: {} at target site: {}",
+                            &module.funcs.get(*value).name.as_ref().unwrap(),
+                            key
+                        );
+                    }
+                    // all function call targets should have the same type here...
+                    let ty_id = module.funcs.get(id[0]).ty();
                     let mut params = Vec::from(module.types.get(ty_id).params());
                     let old_params = params.clone();
                     // call target location (to trap if we messed up & maintain the same params)
@@ -84,32 +96,40 @@ pub fn generate_stubs(module: &mut Module,
                     let mut func_body = temp.func_body();
 
                     // Check that the call target matches
-                    let target = *map.as_ref().unwrap().map.get(key).unwrap();
-                    func_body.block_at(0, None, |block| {
-                        block
-                            .i32_const(target)
-                            .local_get(param_locals[params.len() - 1])
-                            .binop(BinaryOp::I32Ne)
-                            .if_else(
-                                None,
-                                |then| {
-                                    then.unreachable();
-                                },
-                                |_| {},
-                            );
-                    });
+                    let target = map.as_ref().unwrap().map.get(key).unwrap();
 
-                    for idx in 0..(params.len() - 1) {
-                        func_body.local_get(param_locals[idx]);
+                    // For each function that can be called:
+                    // 1) Check if we have to trap (can't find the call!)
+                    // 2) emit the call
+                    // 3) update the modified map
+
+                    // If call target matches...
+                    for call_idx in 0..id.len() { 
+                        func_body.block_at(0, None, |block| {
+                            block
+                                .i32_const(target[call_idx])
+                                .local_get(param_locals[params.len() - 1])
+                                .binop(BinaryOp::I32Eq)
+                                .if_else(
+                                    None,
+                                    |then| {
+                                        for idx in 0..(params.len() - 1) {
+                                            then.local_get(param_locals[idx]);
+                                        }
+
+                                        // call the old id!
+                                        then.call(id[call_idx]).return_();
+                                    },
+                                    |_| {},
+                                );
+                        });
                     }
-
-                    // call the old id!
-                    func_body.call(id);
+                    func_body.unreachable();
 
                     let new_id = temp.finish(param_locals, &mut module.funcs);
 
                     let val = MapValue {
-                        f_id: Some(new_id),
+                        f_id: Some(vec![new_id]),
                         f_bool: false,
                     };
                     modified_map.insert(*key, val);

@@ -10,7 +10,7 @@ use crate::Profile;
 // 3) No-op
 #[derive(Clone, Debug)]
 pub struct MapValue {
-    pub f_id: Option<FunctionId>,
+    pub f_id: Option<Vec<FunctionId>>,
     pub f_bool: bool,
 }
 
@@ -37,14 +37,23 @@ pub fn process_map(module: &Module, original_map: &Option<Profile>, modified_map
         // We need to remap the index in this table to a FuncionId in this element
         // Later we will replace indirect calls using this mapping of global idx ==> FunctionId
         for (global_idx, indirect_idx) in &original_map.as_ref().unwrap().map {
-            if *indirect_idx >= 0 {
+            // Vec contains actual func calls
+            let calls: Vec<&i32> = indirect_idx.iter().filter(|val| **val != -2 && **val != -1).collect::<Vec<&i32>>();
+            if calls.len() > 0 {
+                //dbg!(&calls);
+                let mut func_ids = vec![];
+                for id in calls {
+                    func_ids.push(e.members[(*id as usize) - offset].unwrap());
+                }
                 let val = MapValue {
-                    f_id: e.members[(*indirect_idx as usize) - offset],
+                    f_id: Some(func_ids),
                     f_bool: false,
                 };
                 modified_map.insert(*global_idx, val);
             // if we must retain the indirect call
-            } else if *indirect_idx == -2 {
+            // if the values have been set to -2
+            } else if indirect_idx.iter().filter(|val| **val == -2).collect::<Vec<&i32>>().len() == indirect_idx.len() {
+                //dbg!(&indirect_idx.iter().filter(|val| **val == -2).collect::<Vec<&i32>>());
                 let val = MapValue {
                     f_id: None,
                     f_bool: false,
