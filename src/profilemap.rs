@@ -1,8 +1,8 @@
-use walrus::*;
-use walrus::InitExpr::*;
-use walrus::ir::Value;
-use std::collections::HashMap;
 use crate::Profile;
+use std::collections::HashMap;
+use walrus::ir::Value;
+use walrus::InitExpr::*;
+use walrus::*;
 
 // In our modified map, we can perform 3 operations:
 // 1) Replace an indirect call with a func id
@@ -14,7 +14,11 @@ pub struct MapValue {
     pub f_bool: bool,
 }
 
-pub fn process_map(module: &Module, original_map: &Option<Profile>, modified_map: &mut HashMap<usize, MapValue>) -> () {
+pub fn process_map(
+    module: &Module,
+    original_map: &Option<Profile>,
+    modified_map: &mut HashMap<usize, MapValue>,
+) -> () {
     let tab_id = module.tables.main_function_table().unwrap().unwrap();
     let table = module.tables.get(tab_id);
     for elem in &table.elem_segments {
@@ -38,7 +42,10 @@ pub fn process_map(module: &Module, original_map: &Option<Profile>, modified_map
         // Later we will replace indirect calls using this mapping of global idx ==> FunctionId
         for (global_idx, indirect_idx) in &original_map.as_ref().unwrap().map {
             // Vec contains actual func calls
-            let calls: Vec<&i32> = indirect_idx.iter().filter(|val| **val != -2 && **val != -1).collect::<Vec<&i32>>();
+            let calls: Vec<&i32> = indirect_idx
+                .iter()
+                .filter(|val| **val != -2 && **val != -1)
+                .collect::<Vec<&i32>>();
             if calls.len() > 0 {
                 //dbg!(&calls);
                 let mut func_ids = vec![];
@@ -52,7 +59,13 @@ pub fn process_map(module: &Module, original_map: &Option<Profile>, modified_map
                 modified_map.insert(*global_idx, val);
             // if we must retain the indirect call
             // if the values have been set to -2
-            } else if indirect_idx.iter().filter(|val| **val == -2).collect::<Vec<&i32>>().len() == indirect_idx.len() {
+            } else if indirect_idx
+                .iter()
+                .filter(|val| **val == -2)
+                .collect::<Vec<&i32>>()
+                .len()
+                == indirect_idx.len()
+            {
                 //dbg!(&indirect_idx.iter().filter(|val| **val == -2).collect::<Vec<&i32>>());
                 let val = MapValue {
                     f_id: None,

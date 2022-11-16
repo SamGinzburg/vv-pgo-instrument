@@ -1,17 +1,18 @@
+use crate::MapValue;
+use crate::Profile;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use crate::MapValue;
-use walrus::*;
 use walrus::ir::*;
-use crate::Profile;
+use walrus::*;
 
-pub fn generate_stubs(module: &mut Module,
-                  final_types: &mut HashSet<(TypeId, TableId)>,
-                  stubs: &mut HashMap<TypeId, FunctionId>,
-                  modified_map: &mut HashMap<usize, MapValue>,
-                  map: &Option<Profile>,
-                  is_opt: bool) {
-
+pub fn generate_stubs(
+    module: &mut Module,
+    final_types: &mut HashSet<(TypeId, TableId)>,
+    stubs: &mut HashMap<TypeId, FunctionId>,
+    modified_map: &mut HashMap<usize, MapValue>,
+    map: &Option<Profile>,
+    is_opt: bool,
+) {
     let mut idx = 0;
     if !is_opt {
         for (ty, tab) in final_types.clone() {
@@ -44,7 +45,7 @@ pub fn generate_stubs(module: &mut Module,
 
             let mut func_body = indirect_stub.func_body();
 
-            for idx in 0..(param_locals.len()-1) {
+            for idx in 0..(param_locals.len() - 1) {
                 func_body.local_get(param_locals[idx]);
             }
 
@@ -104,7 +105,7 @@ pub fn generate_stubs(module: &mut Module,
                     // 3) update the modified map
 
                     // If call target matches...
-                    for call_idx in 0..id.len() { 
+                    for call_idx in 0..id.len() {
                         func_body.block_at(0, None, |block| {
                             block
                                 .i32_const(target[call_idx])
@@ -142,6 +143,3 @@ pub fn generate_stubs(module: &mut Module,
         }
     }
 }
-
-
-

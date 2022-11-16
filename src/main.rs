@@ -1,7 +1,12 @@
-mod profilemap;
+mod fastcalls;
 mod instrument;
+mod profilemap;
 
 use clap::{value_t, App, Arg};
+use fastcalls::*;
+use instrument::generate_stubs;
+use profilemap::process_map;
+use profilemap::MapValue;
 use rmp_serde::decode;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -20,9 +25,6 @@ use walrus::InstrSeqBuilder;
 use walrus::TableId;
 use walrus::TypeId;
 use walrus::ValType;
-use profilemap::process_map;
-use profilemap::MapValue;
-use instrument::generate_stubs;
 
 #[derive(Deserialize, Debug)]
 pub struct Profile {
@@ -46,7 +48,7 @@ impl VisitorMut for TypeScan {
 }
 
 fn main() {
-    let matches = App::new("vectorvisor")
+    let matches = App::new("vv-profiler")
         .version("0.1")
         .author("Sam Ginzburg <ginzburg.sam@gmail.com>")
         .about("A WASM profiling utility for VectorVisor")
@@ -104,6 +106,14 @@ fn main() {
 
     let mut module = walrus::Module::from_file(input).unwrap();
 
+    // Identify slowcalls that we need to instrument
+    let slowcalls = if !is_opt {
+        compute_slowcalls(&mut module)
+    } else {
+        // No-op since we don't need to instrument anything
+        HashSet::new()
+    };
+
     // We need to map the profiling data to FunctionId refs in the AST
     // We parse table 0, get the offset, and then iterate through the functions
     let mut modified_map: HashMap<usize, MapValue> = HashMap::new();
@@ -136,12 +146,14 @@ fn main() {
     let mut stubs: HashMap<TypeId, FunctionId> = HashMap::new();
 
     // Generate stubs to replace indirect calls + add instrumentation
-    generate_stubs(&mut module,
-                   &mut final_types,
-                   &mut stubs,
-                   &mut modified_map,
-                   &map,
-                   is_opt);
+    generate_stubs(
+        &mut module,
+        &mut final_types,
+        &mut stubs,
+        &mut modified_map,
+        &map,
+        is_opt,
+    );
 
     // values
     let mut skip_funcs: HashSet<FunctionId> = HashSet::new();
@@ -236,7 +248,7 @@ fn main() {
                             assert!(id.len() == 1, "id is of len: {}", id.len());
                             body.instr_at(point, walrus::ir::Call { func: id[0] });
                             // We now have Call --> CallIndirect, with "Call" at point
-                            body.instrs_mut().remove(point+1);
+                            body.instrs_mut().remove(point + 1);
                         }
                         // Replace the call with `unreachable`
                         MapValue {
@@ -244,7 +256,7 @@ fn main() {
                             f_bool: true,
                         } => {
                             body.instr_at(point, walrus::ir::Unreachable {});
-                            body.instrs_mut().remove(point+1);
+                            body.instrs_mut().remove(point + 1);
                         }
                         // Retain the indirect call (no-op)
                         MapValue {
@@ -255,13 +267,19 @@ fn main() {
                         }
                         _ => {
                             panic!("unhandled case: {:?}", map_val);
-                        },
+                        }
                     }
                     global_index += 1;
                 }
             }
         }
     });
+
+    let slowcalls_id = module.globals.add_local(
+        walrus::ValType::I32,
+        true,
+        walrus::InitExpr::Value(Value::I32(-1)),
+    );
 
     if !is_opt {
         // Now insert globals to track each call site
@@ -283,16 +301,8 @@ fn main() {
             );
         }
 
-        // Create a global for tracking "slowcalls"
-        // Every time we call a function that VV can't optimize we will inc this counter
-        let slowcalls_id = module.globals.add_local(
-                    walrus::ValType::I32,
-                    true,
-                    walrus::InitExpr::Value(Value::I32(-1)),
-                );
         // Construct a mapping of function id ==> bools, to identify fastcalls
         // TODO
-
 
         // Now time to go back and modify the indirect call stubs to modify local values
         for function_idx in skip_funcs {
@@ -309,9 +319,11 @@ fn main() {
             //let counter = module.locals.add(ValType::I32);
             let set_value = module.locals.add(ValType::I32);
             func_body.block_at(0, None, |block| {
-                block.global_get(slowcalls_id)
-                     .i32_const(1).binop(BinaryOp::I32Add)
-                     .global_set(slowcalls_id);
+                block
+                    .global_get(slowcalls_id)
+                    .i32_const(1)
+                    .binop(BinaryOp::I32Add)
+                    .global_set(slowcalls_id);
             });
             drop(func_body);
             let mut block_seq = func_builder.dangling_instr_seq(None);
@@ -322,7 +334,7 @@ fn main() {
                  * We "iterate" through the "array" to find an open slot
                  *
                  * For each slot:
-                 * if the matching global is -1, set the value ( and set_value <- true) 
+                 * if the matching global is -1, set the value ( and set_value <- true)
                  *  after setting, we break out.
                  *
                  * if after falling through all available slots, set_value != true
@@ -341,8 +353,7 @@ fn main() {
                                 |then| {
                                     // For each target, we want to check if the previous indirect call
                                     // matches...
-                                        then
-                                        .global_get(*array_value)
+                                    then.global_get(*array_value)
                                         .i32_const(-1)
                                         .binop(BinaryOp::I32Eq)
                                         // OR if the value is already set
@@ -356,12 +367,10 @@ fn main() {
                                             None,
                                             |then| {
                                                 then.local_get(indirect_call_value)
-                                                    .global_set(
-                                                    *array_value,
-                                                )
-                                                .i32_const(1)
-                                                .local_set(set_value)
-                                                .br(block_seq_id);
+                                                    .global_set(*array_value)
+                                                    .i32_const(1)
+                                                    .local_set(set_value)
+                                                    .br(block_seq_id);
                                             },
                                             |_| {},
                                         );
@@ -373,28 +382,36 @@ fn main() {
             }
             drop(block_seq);
             let mut func_body = func_builder.func_body();
-            func_body.instr_at(1, walrus::ir::Instr::Block ( walrus::ir::Block { seq: block_seq_id } ) );
+            func_body.instr_at(
+                1,
+                walrus::ir::Instr::Block(walrus::ir::Block { seq: block_seq_id }),
+            );
             // now check if we failed to set any of the slots for our call target
             // we have to do this for each call target all over again...
             for global_idx in 0..global_index as usize {
                 let arr = global_map.get(&(global_idx as usize)).unwrap();
                 func_body
-                .local_get(indirect_call_value)
-                .i32_const((global_idx).try_into().unwrap())
-                .binop(BinaryOp::I32Eq)
-                .if_else(None, |then| {
-                    then
-                    .local_get(set_value)
-                    .i32_const(1)
-                    .binop(BinaryOp::I32Ne)
-                    .if_else(None, |then| {
-                        for idx in 0..indirect_window {
-                            then
-                            .i32_const(-2)
-                            .global_set(arr[idx]);
-                        }
-                    }, |_| {});
-                }, |_| {});
+                    .local_get(indirect_call_value)
+                    .i32_const((global_idx).try_into().unwrap())
+                    .binop(BinaryOp::I32Eq)
+                    .if_else(
+                        None,
+                        |then| {
+                            then.local_get(set_value)
+                                .i32_const(1)
+                                .binop(BinaryOp::I32Ne)
+                                .if_else(
+                                    None,
+                                    |then| {
+                                        for idx in 0..indirect_window {
+                                            then.i32_const(-2).global_set(arr[idx]);
+                                        }
+                                    },
+                                    |_| {},
+                                );
+                        },
+                        |_| {},
+                    );
             }
         }
 
@@ -406,11 +423,17 @@ fn main() {
         for (idx, g) in global_map {
             // We represent each callsite using multuple global values
             for inner_idx in 0..g.len() {
-                module.exports.add(&format!("profiling_global_{}_{}", idx, inner_idx), g[inner_idx]);
+                module.exports.add(
+                    &format!("profiling_global_{}_{}", idx, inner_idx),
+                    g[inner_idx],
+                );
             }
         }
     }
 
+    if !is_opt {
+        generate_slowcall_stubs(&mut module, &slowcalls, &slowcalls_id)
+    }
 
     let wasm = module.emit_wasm();
     std::fs::write(output, wasm).unwrap();
