@@ -7,15 +7,16 @@ use walrus::ir::*;
 use walrus::FunctionKind::Import;
 use walrus::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq)]
 pub struct FastCallScan {
     is_fastcall: bool,
     // keep track of ambiguous calls
     deps: HashSet<FunctionId>,
     func_id: FunctionId,
     imported_funcs: HashSet<FunctionId>,
-    all_funcs: Vec<(FunctionId, Type)>,
+    all_funcs: HashSet<(FunctionId, Type)>,
     all_types: HashMap<TypeId, Type>,
+    start_id: FunctionId,
 }
 
 impl Hash for FastCallScan {
@@ -28,10 +29,13 @@ impl PartialEq for FastCallScan {
         self.func_id == other.func_id
     }
 }
-impl Eq for FastCallScan {}
 
 impl VisitorMut for FastCallScan {
     fn visit_instr_mut(&mut self, instr: &mut walrus::ir::Instr, idx: &mut walrus::InstrLocId) {
+        if self.start_id == self.func_id {
+            self.is_fastcall = false;
+            return;
+        }
         match instr {
             // any indirect call automatically taints our fastcall opt pass
             CallIndirect(call_indirect) => {
@@ -72,7 +76,16 @@ impl VisitorMut for FastCallScan {
 }
 
 fn contains_slowcall(scan: &FastCallScan, slowset: &HashSet<&FastCallScan>) -> bool {
-    slowset.contains(scan)
+    let mut slow_set = HashSet::new();
+    for call in slowset {
+        slow_set.insert(call.func_id);
+    }
+    scan.deps
+        .iter()
+        .filter(|x| slow_set.contains(x))
+        .collect::<Vec<&FunctionId>>()
+        .len()
+        > 0
 }
 
 fn check_fastcall_deps(scan: &FastCallScan, fastset: &HashSet<&FastCallScan>) -> bool {
@@ -107,13 +120,53 @@ pub fn compute_slowcalls(module: &mut Module) -> HashSet<FunctionId> {
         _ => (),
     });
 
-    let mod_funcs: Vec<(FunctionId, Type)> = module
-        .funcs
+
+    // the "_start" func also cannot be optimized
+    // For some bizarre reason, this functionality is broken in walrus
+    //let start_id = module.start.unwrap().clone();
+    let start_id: FunctionId = module
+        .exports
         .iter()
-        .map(|x| (x.id(), type_lookup(x.ty(), module)))
+        .filter(|export| export.name == "_start")
+        .map(|export| {
+            // Get the function id from the export
+            match export.item {
+                ExportItem::Function(f_id) => f_id,
+                _ => panic!("No function id associated with _start!"),
+            }
+        })
+        .collect::<Vec<FunctionId>>()[0];
+
+    // Get the set of possible indirect call targets
+    let indirect_call_table =
+        if let Some(indirect_call_table) = module.tables.main_function_table().unwrap() {
+            indirect_call_table
+        } else {
+            panic!("Unable to find indirect call table")
+        };
+
+    let call_table: HashSet<(FunctionId, Type)> = module
+        .tables
+        .get(indirect_call_table)
+        .elem_segments
+        .iter()
+        .map(|x| module.elements.get(*x))
+        .collect::<Vec<&Element>>()[0]
+        .members
+        .iter()
+        .map(|x| {
+            let id = x.unwrap();
+            let func_ty_id = module.funcs.get(id).ty();
+            let ty = type_lookup(func_ty_id, module);
+            (id, ty)
+        })
         .collect();
 
-    let types: Vec<(TypeId, Type)> = module.types.iter().map(|x| (x.id().clone(), x.clone())).collect();
+    let types: Vec<(TypeId, Type)> = module
+        .types
+        .iter()
+        .map(|x| (x.id().clone(), x.clone()))
+        .collect();
     let mut mod_types = HashMap::new();
     for (ty_id, ty) in types {
         mod_types.insert(ty_id, ty);
@@ -127,8 +180,9 @@ pub fn compute_slowcalls(module: &mut Module) -> HashSet<FunctionId> {
             func_id: id,
             deps: HashSet::new(),
             imported_funcs: imported_funcs.clone(),
-            all_funcs: mod_funcs.clone(),
+            all_funcs: call_table.clone(),
             all_types: mod_types.clone(),
+            start_id: start_id,
         };
         walrus::ir::dfs_pre_order_mut(&mut scan, func, entry);
         scan_results.push(scan);
@@ -196,8 +250,7 @@ pub fn compute_slowcalls(module: &mut Module) -> HashSet<FunctionId> {
         set.insert(call.func_id);
     }
 
-    // Note these numbers won't match *exactly* to VV's output on the same binary
-    // This is because VV performs some extra optimizations around indirect calls
+    // Note these numbers are close but don't match *exactly* to VV's output on the same binary
     println!(
         "Speculatively identified {} fastcalls and {} slowcalls",
         fastcalls.len(),
