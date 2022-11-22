@@ -138,29 +138,29 @@ pub fn compute_slowcalls(module: &mut Module) -> HashSet<FunctionId> {
         .collect::<Vec<FunctionId>>()[0];
 
     // Get the set of possible indirect call targets
-    let indirect_call_table =
+    let call_table: HashSet<(FunctionId, Type)> =
         if let Some(indirect_call_table) = module.tables.main_function_table().unwrap() {
-            indirect_call_table
+            module
+            .tables
+            .get(indirect_call_table)
+            .elem_segments
+            .iter()
+            .map(|x| module.elements.get(*x))
+            .collect::<Vec<&Element>>()[0]
+            .members
+            .iter()
+            .map(|x| {
+                let id = x.unwrap();
+                let func_ty_id = module.funcs.get(id).ty();
+                let ty = type_lookup(func_ty_id, module);
+                (id, ty)
+            })
+            .collect()
         } else {
-            panic!("Unable to find indirect call table")
+            println!("Unable to find indirect call table --- not instrumenting remaining slowcalls");
+            HashSet::new()
         };
 
-    let call_table: HashSet<(FunctionId, Type)> = module
-        .tables
-        .get(indirect_call_table)
-        .elem_segments
-        .iter()
-        .map(|x| module.elements.get(*x))
-        .collect::<Vec<&Element>>()[0]
-        .members
-        .iter()
-        .map(|x| {
-            let id = x.unwrap();
-            let func_ty_id = module.funcs.get(id).ty();
-            let ty = type_lookup(func_ty_id, module);
-            (id, ty)
-        })
-        .collect();
 
     let types: Vec<(TypeId, Type)> = module
         .types
@@ -262,13 +262,18 @@ pub fn compute_slowcalls(module: &mut Module) -> HashSet<FunctionId> {
 
 struct CallScanner {
     mapping: HashMap<FunctionId, FunctionId>,
+    curr_func: FunctionId,
 }
 
+// When complete, replace all calls with the stub
 impl VisitorMut for CallScanner {
     fn visit_instr_mut(&mut self, instr: &mut walrus::ir::Instr, idx: &mut walrus::InstrLocId) {
         match instr {
             Call(idx) => match self.mapping.get(&idx.func) {
-                Some(new_idx) => {}
+                // We don't want to substitute calls inside of our stubs
+                Some(new_idx) if *new_idx != self.curr_func => {
+                    *instr = Instr::Call( ir::Call { func: *new_idx } ).into()
+                }
                 _ => (),
             },
             _ => {}
@@ -324,6 +329,7 @@ pub fn generate_slowcall_stubs(
         let entry = func.entry_block();
         let mut scan = CallScanner {
             mapping: func_mapping.clone(),
+            curr_func: id,
         };
         walrus::ir::dfs_pre_order_mut(&mut scan, func, entry);
     });

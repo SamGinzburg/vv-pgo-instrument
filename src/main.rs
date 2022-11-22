@@ -275,17 +275,21 @@ fn main() {
         }
     });
 
-    let indirect_id = module.globals.add_local(
-        walrus::ValType::I32,
-        true,
-        walrus::InitExpr::Value(Value::I32(0)),
-    );
+    let mut indirect_id = None;
+    let mut slowcalls_id = None;
+    if !is_opt {
+        indirect_id = Some(module.globals.add_local(
+            walrus::ValType::I32,
+            true,
+            walrus::InitExpr::Value(Value::I32(0)),
+        ));
 
-    let slowcalls_id = module.globals.add_local(
-        walrus::ValType::I32,
-        true,
-        walrus::InitExpr::Value(Value::I32(0)),
-    );
+        slowcalls_id = Some(module.globals.add_local(
+            walrus::ValType::I32,
+            true,
+            walrus::InitExpr::Value(Value::I32(0)),
+        ));
+    }
 
     if !is_opt {
         // Now insert globals to track each call site
@@ -326,10 +330,10 @@ fn main() {
             let set_value = module.locals.add(ValType::I32);
             func_body.block_at(0, None, |block| {
                 block
-                    .global_get(indirect_id)
+                    .global_get(indirect_id.unwrap())
                     .i32_const(1)
                     .binop(BinaryOp::I32Add)
-                    .global_set(indirect_id);
+                    .global_set(indirect_id.unwrap());
             });
             drop(func_body);
             let mut block_seq = func_builder.dangling_instr_seq(None);
@@ -423,9 +427,13 @@ fn main() {
 
         // Now that we have instrumented the indirect calls,
         // we will instrument the regular slowcalls
+    
+        // Don't include these exported globals in the final optimized binary
+        if !is_opt {
+            module.exports.add(&format!("indirect"), indirect_id.unwrap());
+            module.exports.add(&format!("slowcalls"), slowcalls_id.unwrap());
+        }
 
-        module.exports.add(&format!("indirect"), indirect_id);
-        module.exports.add(&format!("slowcalls"), slowcalls_id);
         // Export all of our globals
         for (idx, g) in global_map {
             // We represent each callsite using multuple global values
@@ -439,7 +447,7 @@ fn main() {
     }
 
     if !is_opt {
-        generate_slowcall_stubs(&mut module, &slowcalls, &slowcalls_id)
+        generate_slowcall_stubs(&mut module, &slowcalls, &slowcalls_id.unwrap())
     }
 
     let wasm = module.emit_wasm();
