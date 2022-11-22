@@ -275,10 +275,16 @@ fn main() {
         }
     });
 
+    let indirect_id = module.globals.add_local(
+        walrus::ValType::I32,
+        true,
+        walrus::InitExpr::Value(Value::I32(0)),
+    );
+
     let slowcalls_id = module.globals.add_local(
         walrus::ValType::I32,
         true,
-        walrus::InitExpr::Value(Value::I32(-1)),
+        walrus::InitExpr::Value(Value::I32(0)),
     );
 
     if !is_opt {
@@ -320,10 +326,10 @@ fn main() {
             let set_value = module.locals.add(ValType::I32);
             func_body.block_at(0, None, |block| {
                 block
-                    .global_get(slowcalls_id)
+                    .global_get(indirect_id)
                     .i32_const(1)
                     .binop(BinaryOp::I32Add)
-                    .global_set(slowcalls_id);
+                    .global_set(indirect_id);
             });
             drop(func_body);
             let mut block_seq = func_builder.dangling_instr_seq(None);
@@ -418,6 +424,7 @@ fn main() {
         // Now that we have instrumented the indirect calls,
         // we will instrument the regular slowcalls
 
+        module.exports.add(&format!("indirect"), indirect_id);
         module.exports.add(&format!("slowcalls"), slowcalls_id);
         // Export all of our globals
         for (idx, g) in global_map {
