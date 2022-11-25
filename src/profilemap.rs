@@ -38,7 +38,7 @@ pub fn process_map(
 
         // Now that we have the offset, we can remap our profile data
         // We recorded a mapping of indicies in this table to a value of {-1/-2/integer >= 0}
-        // We need to remap the index in this table to a FuncionId in this element
+        // We need to remap the index in this table to a FunctionId in this element
         // Later we will replace indirect calls using this mapping of global idx ==> FunctionId
         for (global_idx, indirect_idx) in &original_map.as_ref().unwrap().map {
             // Vec contains actual func calls

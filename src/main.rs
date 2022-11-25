@@ -83,11 +83,23 @@ fn main() {
                 .number_of_values(1)
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("window")
+                .short("w")
+                .long("window")
+                .default_value("15")
+                .help("Vary the number of potential indirect call targets to track (15 by default, 50 max)")
+                .multiple(false)
+                .number_of_values(1)
+                .takes_value(true),
+        )
         .get_matches();
 
-    let indirect_window = 5;
     let input = value_t!(matches.value_of("input"), String).unwrap_or_else(|e| e.exit());
     let output = value_t!(matches.value_of("output"), String).unwrap_or_else(|e| e.exit());
+    let indirect_window = value_t!(matches.value_of("window"), usize).unwrap_or_else(|e| e.exit());
+    assert!(indirect_window <= 50);
+
     let optimize: Option<&str> = matches.value_of("optimize");
     let is_opt = match optimize {
         Some(_) => true,
@@ -333,7 +345,9 @@ fn main() {
                     .global_get(indirect_id.unwrap())
                     .i32_const(1)
                     .binop(BinaryOp::I32Add)
-                    .global_set(indirect_id.unwrap());
+                    .global_set(indirect_id.unwrap())
+                    .i32_const(0)
+                    .local_set(set_value);
             });
             drop(func_body);
             let mut block_seq = func_builder.dangling_instr_seq(None);
@@ -396,12 +410,14 @@ fn main() {
                 1,
                 walrus::ir::Instr::Block(walrus::ir::Block { seq: block_seq_id }),
             );
+            let mut block_seq = func_builder.dangling_instr_seq(None);
+            let block_seq_id = block_seq.id();
             // now check if we failed to set any of the slots for our call target
             // we have to do this for each call target all over again...
             for global_idx in 0..global_index as usize {
                 let arr = global_map.get(&(global_idx as usize)).unwrap();
-                func_body
-                    .local_get(indirect_call_value)
+                block_seq 
+                    .local_get(call_target)
                     .i32_const((global_idx).try_into().unwrap())
                     .binop(BinaryOp::I32Eq)
                     .if_else(
@@ -423,6 +439,12 @@ fn main() {
                         |_| {},
                     );
             }
+            let mut func_body = func_builder.func_body();
+            func_body.instr_at(
+                2,
+                walrus::ir::Instr::Block(walrus::ir::Block { seq: block_seq_id }),
+            );
+            //end
         }
 
         // Now that we have instrumented the indirect calls,
